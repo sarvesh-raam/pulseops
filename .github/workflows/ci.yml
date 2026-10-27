@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  services:
+    name: Services (lint + tests)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: pulseops
+          POSTGRES_PASSWORD: pulseops
+          POSTGRES_DB: pulseops
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pulseops" --health-interval 2s --health-timeout 5s --health-retries 20
+    defaults:
+      run:
+        working-directory: services
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: services/common/pyproject.toml
+      - name: Install
+        run: pip install ./common "pytest>=8.3" "pytest-asyncio>=0.24" "ruff>=0.6"
+      - name: Lint
+        run: ruff check .
+      - name: Tests (against a real Postgres)
+        run: pytest -q
+        env:
+          TEST_DATABASE_URL: postgresql://pulseops:pulseops@localhost:5434/pulseops
+
+  console:
+    name: Console (typecheck + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+  config:
+    name: Kubernetes + observability config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Render Kustomize and validate against the Kubernetes schema
+        run: |
+          for overlay in deploy environments/kind; do
+            echo "== $overlay"
+            kubectl kustomize "$overlay" > /tmp/rendered.yaml
+            docker run --rm -v /tmp:/work ghcr.io/yannh/kubeconform:v0.6.7 \
+              -strict -summary /work/rendered.yaml
+          done
+      - name: Validate Prometheus config and alert rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/p:ro" \
+            prom/prometheus:v2.53.2 check rules /p/alerts.yml
+          for f in prometheus-compose.yml prometheus-k8s.yml; do
+            docker run --rm --entrypoint promtool -v "$PWD/deploy/observability/prometheus:/p:ro" \
+              prom/prometheus:v2.53.2 check config --syntax-only "/p/$f"
+          done
+      - name: Validate Alertmanager config
+        run: |
+          for f in alertmanager.yml alertmanager-k8s.yml; do
+            docker run --rm --entrypoint amtool -v "$PWD/deploy/observability/alertmanager:/a:ro" \
+              prom/alertmanager:v0.27.0 check-config "/a/$f"
+          done
+      - name: Validate docker-compose
+        run: docker compose config --quiet
+
+  e2e:
+    name: Kubernetes self-healing (kind + chaos)
+    needs: [services, console, config]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: pulseops
+          config: environments/kind/kind-cluster.yaml
+          wait: 120s
+      - name: Build and load images
+        run: |
+          for s in gateway orders inventory payments loadgen controlplane; do
+            docker build -q --build-arg SERVICE=$s -t pulseops/$s:local services
+          done
+          docker build -q -t pulseops/console:local console
+          kind load docker-image --name pulseops \
+            pulseops/gateway:local pulseops/orders:local pulseops/inventory:local pulseops/payments:local \
+            pulseops/loadgen:local pulseops/controlplane:local pulseops/console:local
+      - name: Deploy
+        run: |
+          kubectl apply -k environments/kind
+          kubectl -n pulseops rollout status statefulset/postgres --timeout=180s
+          for ns in pulseops pulseops-system; do
+            kubectl -n $ns wait deployment --all --for=condition=Available --timeout=300s
+          done
+      - name: Shop serves traffic
+        run: |
+          kubectl -n pulseops port-forward svc/gateway 8000:8000 >/dev/null 2>&1 &
+          sleep 3
+          curl -fsS localhost:8000/api/products | head -c 300; echo
+          curl -fsS -X POST localhost:8000/api/orders -H 'content-type: application/json' \
+            -d '{"items":[{"sku":"KB-01","qty":1}]}'; echo
+      - name: Chaos - kill pods and require Kubernetes to heal them
+        run: |
+          kubectl -n pulseops-system port-forward svc/controlplane 8001:8000 >/dev/null 2>&1 &
+          sleep 3
+          # a Deployment (orders) and a StatefulSet (postgres: same pod name comes back)
+          for svc in orders postgres; do
+            id=$(curl -fsS -X POST localhost:8001/api/chaos/kill -H 'content-type: application/json' \
+                   -d "{\"service\":\"$svc\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+            echo "killed a $svc pod (experiment $id)"
+            for i in $(seq 1 90); do
+              status=$(curl -fsS localhost:8001/api/experiments | python3 -c \
+                "import sys,json; print(next(e['status']+' '+str(e['recovery_seconds']) for e in json.load(sys.stdin) if e['id']=='$id'))")
+              case "$status" in
+                recovered*) echo "$svc recovered in ${status#recovered }s"; break ;;
+                failed*) echo "$svc did NOT recover"; exit 1 ;;
+              esac
+              sleep 2
+            done
+            [ "${status%% *}" = recovered ] || { echo "timed out waiting for $svc"; exit 1; }
+          done
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl -n pulseops get events --sort-by=.lastTimestamp | tail -40
+          kubectl -n pulseops-system logs deploy/controlplane --tail=100 || true

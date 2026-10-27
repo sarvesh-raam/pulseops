@@ -1,0 +1,115 @@
+name: CD
+
+# Runs after CI succeeds on main: publishes every image to GHCR, then (if a
+# cluster is configured) rolls the new version out and rolls back on failure.
+#
+# Repository settings (both optional; without them only the images are published):
+#   vars.DEPLOY_ENABLED  "true" to enable the deploy job
+#   secrets.KUBE_CONFIG  base64-encoded kubeconfig for the target cluster
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  publish:
+    name: Publish ${{ matrix.image }}
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {image: gateway, context: services, service: gateway}
+          - {image: orders, context: services, service: orders}
+          - {image: inventory, context: services, service: inventory}
+          - {image: payments, context: services, service: payments}
+          - {image: loadgen, context: services, service: loadgen}
+          - {image: controlplane, context: services, service: controlplane}
+          - {image: console, context: console, service: ""}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+      - name: Image name (GHCR requires lowercase)
+        run: echo "IMAGE=${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/pulseops-${{ matrix.image }}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          build-args: ${{ matrix.service && format('SERVICE={0}', matrix.service) || '' }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.SHA }}
+            ${{ env.IMAGE }}:latest
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: publish
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.SHA }}
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: Pin images to this commit
+        working-directory: deploy
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          for s in gateway orders inventory payments loadgen controlplane console; do
+            kustomize edit set image "pulseops/$s=ghcr.io/${OWNER}/pulseops-$s:${SHA}"
+          done
+      - name: Apply and wait for rollout
+        id: rollout
+        run: |
+          kubectl apply -k deploy
+          kubectl -n pulseops rollout status statefulset/postgres --timeout=300s
+          for d in gateway orders inventory payments loadgen; do
+            kubectl -n pulseops rollout status deployment/$d --timeout=300s
+          done
+          for d in controlplane console; do
+            kubectl -n pulseops-system rollout status deployment/$d --timeout=300s
+          done
+      - name: Smoke test
+        run: |
+          kubectl -n pulseops port-forward svc/gateway 8000:8000 >/dev/null 2>&1 &
+          sleep 3
+          curl -fsS --retry 5 --retry-delay 3 --retry-all-errors localhost:8000/readyz
+      - name: Roll back on failure
+        if: failure() && steps.rollout.outcome != 'skipped'
+        run: |
+          for d in gateway orders inventory payments loadgen; do
+            kubectl -n pulseops rollout undo deployment/$d || true
+          done
+          for d in controlplane console; do
+            kubectl -n pulseops-system rollout undo deployment/$d || true
+          done
