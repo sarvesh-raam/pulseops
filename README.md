@@ -1,5 +1,8 @@
 # PulseOps
 
+[![CI](https://github.com/sarvesh-raam/pulseops/actions/workflows/ci.yml/badge.svg)](https://github.com/sarvesh-raam/pulseops/actions/workflows/ci.yml)
+[![CD](https://github.com/sarvesh-raam/pulseops/actions/workflows/cd.yml/badge.svg)](https://github.com/sarvesh-raam/pulseops/actions/workflows/cd.yml)
+
 An observability and chaos-engineering platform for microservices. It runs a
 small shop (gateway, orders, inventory, payments) under constant synthetic
 traffic, watches it with metrics, logs, traces and alerts, and lets you break
