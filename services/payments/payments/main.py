@@ -5,6 +5,13 @@ for the dashboards and alerts to show.
 Captures are recorded in a small ledger table with order_id as the primary
 key: a retried charge (from any replica) returns the original payment and
 can never capture the same order twice.
+
+/void is the saga's compensation for a charge whose outcome the caller
+never learned (it timed out, the connection dropped): it refunds a capture
+made by that saga attempt, and leaves a tombstone so the same attempt's
+charge — possibly still sleeping inside a slow replica — can no longer
+capture when it finally runs. A later attempt of the same order (a resumed
+saga) is allowed to capture again.
 """
 
 import asyncio
@@ -32,6 +39,8 @@ MIGRATIONS = [
         status TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )""",
+    # saga attempt that captured (or voided) this payment
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS attempt_id UUID",
 ]
 
 
@@ -46,6 +55,12 @@ class Settings(BaseServiceSettings):
 class ChargeRequest(BaseModel):
     order_id: uuid.UUID
     amount_cents: int = Field(ge=1, le=10_000_000)
+    attempt_id: uuid.UUID | None = None
+
+
+class VoidRequest(BaseModel):
+    order_id: uuid.UUID
+    attempt_id: uuid.UUID | None = None
 
 
 class ChargeResponse(BaseModel):
@@ -70,17 +85,32 @@ async def lifespan(app: FastAPI):
 app = create_service_app("payments", settings=settings, lifespan=lifespan, readiness_check=ping(lambda: state["pool"]))
 
 
-async def _existing(order_id: uuid.UUID) -> ChargeResponse | None:
+async def _existing(order_id: uuid.UUID):
     async with state["pool"].acquire() as conn:
-        row = await conn.fetchrow("SELECT order_id, payment_id, status FROM payments WHERE order_id = $1", order_id)
-    return ChargeResponse(**dict(row)) if row else None
+        return await conn.fetchrow(
+            "SELECT order_id, payment_id, status, attempt_id FROM payments WHERE order_id = $1", order_id
+        )
+
+
+def _response(row) -> ChargeResponse:
+    return ChargeResponse(order_id=row["order_id"], payment_id=row["payment_id"], status=row["status"])
+
+
+def _voided_for(row, attempt_id: uuid.UUID | None) -> bool:
+    """True if this charge belongs to an attempt that was already voided."""
+    return row["status"] == "voided" and row["attempt_id"] == attempt_id
 
 
 @app.post("/charge", response_model=ChargeResponse)
 async def charge(body: ChargeRequest) -> ChargeResponse:
     if (done := await _existing(body.order_id)) is not None:
-        PAYMENTS.labels("duplicate").inc()
-        return done
+        if done["status"] == "captured":
+            PAYMENTS.labels("duplicate").inc()
+            return _response(done)
+        if _voided_for(done, body.attempt_id):
+            PAYMENTS.labels("voided").inc()
+            raise HTTPException(status_code=409, detail="payment attempt was voided")
+        # voided by an earlier attempt: this is a resumed saga, charge again
 
     await asyncio.sleep(random.uniform(settings.min_latency_ms, settings.max_latency_ms) / 1000)
 
@@ -94,14 +124,50 @@ async def charge(body: ChargeRequest) -> ChargeResponse:
         raise HTTPException(status_code=402, detail="card declined")
 
     async with state["pool"].acquire() as conn:
+        # Capture unless someone got there first. Overwriting is only
+        # allowed for a tombstone left by a *different* attempt; the guard
+        # sits in the statement itself, so a void that lands while this
+        # request was sleeping still wins.
         row = await conn.fetchrow(
-            "INSERT INTO payments (order_id, payment_id, amount_cents, status) VALUES ($1, $2, $3, 'captured') "
-            "ON CONFLICT (order_id) DO NOTHING RETURNING order_id, payment_id, status",
-            body.order_id, uuid.uuid4(), body.amount_cents,
+            "INSERT INTO payments (order_id, payment_id, amount_cents, status, attempt_id) "
+            "VALUES ($1, $2, $3, 'captured', $4) "
+            "ON CONFLICT (order_id) DO UPDATE SET payment_id = excluded.payment_id, "
+            "amount_cents = excluded.amount_cents, status = 'captured', attempt_id = excluded.attempt_id, "
+            "created_at = now() "
+            "WHERE payments.status = 'voided' AND payments.attempt_id IS DISTINCT FROM excluded.attempt_id "
+            "RETURNING order_id, payment_id, status, attempt_id",
+            body.order_id, uuid.uuid4(), body.amount_cents, body.attempt_id,
         )
     if row is None:
-        # a concurrent retry captured it first — return that payment
-        PAYMENTS.labels("duplicate").inc()
-        return await _existing(body.order_id)
+        current = await _existing(body.order_id)
+        if current["status"] == "captured":
+            # a concurrent retry captured it first — return that payment
+            PAYMENTS.labels("duplicate").inc()
+            return _response(current)
+        PAYMENTS.labels("voided").inc()
+        raise HTTPException(status_code=409, detail="payment attempt was voided")
     PAYMENTS.labels("captured").inc()
-    return ChargeResponse(**dict(row))
+    return _response(row)
+
+
+@app.post("/void", response_model=ChargeResponse)
+async def void(body: VoidRequest) -> ChargeResponse:
+    """Compensation: refund this attempt's capture, or block it from ever
+    happening. Idempotent. A capture made by a *different* attempt is left
+    alone — that attempt is the one that owns the order now."""
+    async with state["pool"].acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO payments (order_id, payment_id, amount_cents, status, attempt_id) "
+            "VALUES ($1, $2, 0, 'voided', $3) "
+            "ON CONFLICT (order_id) DO UPDATE SET status = 'voided', attempt_id = excluded.attempt_id "
+            "WHERE payments.status = 'voided' OR payments.attempt_id IS NOT DISTINCT FROM excluded.attempt_id "
+            "RETURNING order_id, payment_id, status, attempt_id",
+            body.order_id, uuid.uuid4(), body.attempt_id,
+        )
+    if row is None:
+        current = await _existing(body.order_id)
+        PAYMENTS.labels("void_skipped").inc()
+        return _response(current)
+    PAYMENTS.labels("voided").inc()
+    logger.info("payment voided", extra=log_fields(order_id=str(body.order_id)))
+    return _response(row)

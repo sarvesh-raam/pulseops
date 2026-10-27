@@ -46,16 +46,26 @@ class CircuitBreaker:
         self.failures = 0
         self.state = self.CLOSED
         self.opened_at = 0.0
+        self.trial_started_at = 0.0
         self._publish()
 
     def _publish(self) -> None:
         CIRCUIT_STATE.labels(self.service, self.target).set(self.state)
 
     def allow(self) -> bool:
+        now = time.monotonic()
         if self.state == self.OPEN:
-            if time.monotonic() - self.opened_at >= self.reset_after_sec:
+            if now - self.opened_at >= self.reset_after_sec:
                 self.state = self.HALF_OPEN  # let one trial request through
+                self.trial_started_at = now
                 self._publish()
+                return True
+            return False
+        if self.state == self.HALF_OPEN:
+            # only the trial is in flight; everyone else keeps failing fast
+            # until it reports back (or is presumed lost after a cool-down)
+            if now - self.trial_started_at >= self.reset_after_sec:
+                self.trial_started_at = now
                 return True
             return False
         return True

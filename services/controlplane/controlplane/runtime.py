@@ -106,7 +106,8 @@ class KubernetesRuntime:
             elif any(cs.get("state", {}).get("waiting", {}).get("reason") == "CrashLoopBackOff" for cs in container_statuses):
                 phase = "CrashLoopBackOff"
             pods.append(Pod(
-                id=item["metadata"]["name"],
+                # uid, not name: a StatefulSet replacement reuses the name
+                id=item["metadata"].get("uid") or item["metadata"]["name"],
                 name=item["metadata"]["name"],
                 service=service,
                 status=phase,

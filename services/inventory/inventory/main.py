@@ -132,6 +132,11 @@ async def list_products() -> list[Product]:
     return [Product(**dict(r)) for r in rows]
 
 
+async def _lock_order(conn, order_id: uuid.UUID) -> None:
+    """Serialize reserve/release per order until the transaction ends."""
+    await conn.execute("SELECT pg_advisory_xact_lock($1, hashtext($2))", 0x494E56, str(order_id))
+
+
 @app.post("/reserve", response_model=ReserveResponse)
 async def reserve(body: ReserveRequest) -> ReserveResponse:
     # merge duplicate skus so one order can't double-book a primary key
@@ -140,6 +145,9 @@ async def reserve(body: ReserveRequest) -> ReserveResponse:
         wanted[item.sku] = wanted.get(item.sku, 0) + item.qty
 
     async with state["pool"].acquire() as conn, conn.transaction():
+        # two calls for the same order (a retry racing its slow original)
+        # must not both pass the "already reserved?" check below
+        await _lock_order(conn, body.order_id)
         existing = await conn.fetch(
             "SELECT r.sku, r.qty, p.price_cents FROM reservations r JOIN products p USING (sku) "
             "WHERE r.order_id = $1 AND NOT r.released",
@@ -187,6 +195,7 @@ async def reserve(body: ReserveRequest) -> ReserveResponse:
 async def release(body: ReleaseRequest) -> None:
     """Compensation for a failed order: put reserved stock back. Idempotent."""
     async with state["pool"].acquire() as conn, conn.transaction():
+        await _lock_order(conn, body.order_id)
         rows = await conn.fetch(
             "UPDATE reservations SET released = true WHERE order_id = $1 AND NOT released RETURNING sku, qty",
             body.order_id,

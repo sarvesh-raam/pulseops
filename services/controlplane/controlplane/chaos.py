@@ -130,8 +130,10 @@ class ChaosEngine:
             # up *after* the kill
             again = next((p for p in mine if p.id == victim.id), None)
             return again is not None and again.ready and again.started_at is not None and again.started_at > started
-        # kubernetes: the victim must be gone (a replacement pod took its place)
-        return all(p.name != victim.name for p in ready)
+        # kubernetes: the victim must be gone (a replacement pod took its
+        # place). Compared by uid: a StatefulSet's replacement (postgres-0)
+        # comes back under the very same name.
+        return all(p.id != victim.id for p in ready)
 
     async def _watch_recovery(self, experiment: Experiment, victim: Pod, desired: int) -> None:
         loop = asyncio.get_running_loop()

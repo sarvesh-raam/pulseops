@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import time
 
 from opentelemetry import trace
 
@@ -8,6 +9,9 @@ from opentelemetry import trace
 class JsonFormatter(logging.Formatter):
     """One JSON object per line, with the active trace/span id so Grafana
     can jump from a Loki log line straight to the trace in Jaeger."""
+
+    # timestamps end in "Z", so they must actually be UTC
+    converter = time.gmtime
 
     def __init__(self, service: str):
         super().__init__()
