@@ -34,8 +34,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - {name: pulse-backend, context: backend}
-          - {name: pulse-frontend, context: frontend}
+          - {name: pulseops-backend, context: backend}
+          - {name: pulseops-frontend, context: frontend}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,8 +81,8 @@ jobs:
         run: |
           OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           kustomize edit set image \
-            "pulse-backend=ghcr.io/${OWNER}/pulse-backend:${SHA}" \
-            "pulse-frontend=ghcr.io/${OWNER}/pulse-frontend:${SHA}"
+            "pulse-backend=ghcr.io/${OWNER}/pulseops-backend:${SHA}" \
+            "pulse-frontend=ghcr.io/${OWNER}/pulseops-frontend:${SHA}"
       - name: Run migrations
         run: |
           # Jobs are immutable: replace the previous migration run

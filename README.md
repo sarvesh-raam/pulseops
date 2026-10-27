@@ -90,7 +90,7 @@ Secret (real `JWT_SECRET`, managed-database `DATABASE_URL`), drop
   render validated with kubeconform and the Prometheus config/rules with
   promtool; Docker builds on PRs.
 - **CD** (`.github/workflows/cd.yml`, after CI passes on `main`): builds and
-  pushes `ghcr.io/<owner>/pulse-backend` and `pulse-frontend` tagged with the
+  pushes `ghcr.io/<owner>/pulseops-backend` and `pulseops-frontend` tagged with the
   commit SHA and `latest`. If the repo variable `DEPLOY_ENABLED=true` and the
   secret `KUBE_CONFIG` (base64 kubeconfig) are set, it also pins those
   images in Kustomize, runs the migration Job, waits for every rollout,

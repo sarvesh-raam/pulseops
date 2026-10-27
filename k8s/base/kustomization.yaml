@@ -20,11 +20,11 @@ resources:
   - ingress.yaml
 
 # CI overrides these with the commit SHA (see .github/workflows/cd.yml):
-#   kustomize edit set image pulse-backend=ghcr.io/<owner>/pulse-backend:<sha>
+#   kustomize edit set image pulse-backend=ghcr.io/<owner>/pulseops-backend:<sha>
 images:
   - name: pulse-backend
-    newName: ghcr.io/sarvesh-raam/pulse-backend
+    newName: ghcr.io/sarvesh-raam/pulseops-backend
     newTag: latest
   - name: pulse-frontend
-    newName: ghcr.io/sarvesh-raam/pulse-frontend
+    newName: ghcr.io/sarvesh-raam/pulseops-frontend
     newTag: latest
