@@ -1,0 +1,16 @@
+# Alerts are delivered to the PulseOps control plane (shown in the console).
+# Add Slack / PagerDuty / email receivers next to it, e.g.
+#   - name: slack
+#     slack_configs: [{api_url: <webhook>, channel: "#oncall", send_resolved: true}]
+route:
+  receiver: pulseops-console
+  group_by: [alertname, service]
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 1h
+
+receivers:
+  - name: pulseops-console
+    webhook_configs:
+      - url: http://controlplane:8000/api/alerts/webhook
+        send_resolved: true

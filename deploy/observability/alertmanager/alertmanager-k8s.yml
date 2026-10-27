@@ -1,0 +1,13 @@
+# Same routing as alertmanager.yml, with the control plane's in-cluster address.
+route:
+  receiver: pulseops-console
+  group_by: [alertname, service]
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 1h
+
+receivers:
+  - name: pulseops-console
+    webhook_configs:
+      - url: http://controlplane.pulseops-system:8000/api/alerts/webhook
+        send_resolved: true

@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shop-config
+  namespace: pulseops
+data:
+  LOG_LEVEL: INFO
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger.pulseops-observability:4318
+  INVENTORY_URL: http://inventory:8000
+  PAYMENTS_URL: http://payments:8000
+  ORDERS_URL: http://orders:8000
+  GATEWAY_URL: http://gateway:8000
+---
+# Demo values so `kubectl apply -k` works out of the box. For a real cluster
+# create these out-of-band (sealed-secrets / external-secrets) instead.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: shop-secrets
+  namespace: pulseops
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: pulseops-demo
+  DATABASE_URL: postgresql://pulseops:pulseops-demo@postgres:5432/pulseops
+  FAULT_ADMIN_TOKEN: demo-fault-token

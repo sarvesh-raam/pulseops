@@ -1,0 +1,441 @@
+# Generated layout, one block per service: Service + Deployment + PDB (+ HPA).
+# Self-healing at the platform layer, per service:
+#   - replicas >= 2 and a PDB: killing one pod never takes the service down
+#   - readinessProbe /readyz: a pod is only in the Service while it can serve
+#   - livenessProbe /healthz: a wedged process is restarted
+#   - preStop sleep: endpoints are removed before the process stops
+#   - HPA: scales out under load
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: pulseops}
+spec:
+  selector: {app.kubernetes.io/name: gateway}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: pulseops}
+spec:
+  replicas: 2
+  strategy: {rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {app.kubernetes.io/name: gateway}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: gateway, app.kubernetes.io/part-of: pulseops}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8000"}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: gateway}}
+      containers:
+        - name: gateway
+          image: pulseops/gateway
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: LOG_LEVEL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: LOG_LEVEL}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom: {configMapKeyRef: {name: shop-config, key: OTEL_EXPORTER_OTLP_ENDPOINT}}
+            - name: ORDERS_URL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: ORDERS_URL}}
+            - name: INVENTORY_URL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: INVENTORY_URL}}
+            - name: FAULT_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: FAULT_ADMIN_TOKEN}}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop: {exec: {command: [sleep, "3"]}}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: pulseops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: gateway}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: pulseops
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: gateway}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: orders, app.kubernetes.io/part-of: pulseops}
+spec:
+  selector: {app.kubernetes.io/name: orders}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: orders, app.kubernetes.io/part-of: pulseops}
+spec:
+  replicas: 2
+  strategy: {rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {app.kubernetes.io/name: orders}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: orders, app.kubernetes.io/part-of: pulseops}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8000"}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: orders}}
+      containers:
+        - name: orders
+          image: pulseops/orders
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: LOG_LEVEL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: LOG_LEVEL}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom: {configMapKeyRef: {name: shop-config, key: OTEL_EXPORTER_OTLP_ENDPOINT}}
+            - name: INVENTORY_URL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: INVENTORY_URL}}
+            - name: PAYMENTS_URL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: PAYMENTS_URL}}
+            - name: FAULT_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: FAULT_ADMIN_TOKEN}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: DATABASE_URL}}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop: {exec: {command: [sleep, "3"]}}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orders
+  namespace: pulseops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: orders}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orders
+  namespace: pulseops
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: orders}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: inventory, app.kubernetes.io/part-of: pulseops}
+spec:
+  selector: {app.kubernetes.io/name: inventory}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: inventory, app.kubernetes.io/part-of: pulseops}
+spec:
+  replicas: 2
+  strategy: {rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {app.kubernetes.io/name: inventory}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: inventory, app.kubernetes.io/part-of: pulseops}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8000"}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: inventory}}
+      containers:
+        - name: inventory
+          image: pulseops/inventory
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: LOG_LEVEL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: LOG_LEVEL}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom: {configMapKeyRef: {name: shop-config, key: OTEL_EXPORTER_OTLP_ENDPOINT}}
+            - name: FAULT_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: FAULT_ADMIN_TOKEN}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: DATABASE_URL}}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop: {exec: {command: [sleep, "3"]}}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inventory
+  namespace: pulseops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: inventory}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inventory
+  namespace: pulseops
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: inventory}
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: payments, app.kubernetes.io/part-of: pulseops}
+spec:
+  selector: {app.kubernetes.io/name: payments}
+  ports: [{name: http, port: 8000, targetPort: http}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: payments, app.kubernetes.io/part-of: pulseops}
+spec:
+  replicas: 2
+  strategy: {rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector:
+    matchLabels: {app.kubernetes.io/name: payments}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: payments, app.kubernetes.io/part-of: pulseops}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "8000"}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: payments}}
+      containers:
+        - name: payments
+          image: pulseops/payments
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: LOG_LEVEL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: LOG_LEVEL}}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              valueFrom: {configMapKeyRef: {name: shop-config, key: OTEL_EXPORTER_OTLP_ENDPOINT}}
+            - name: FAULT_ADMIN_TOKEN
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: FAULT_ADMIN_TOKEN}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: shop-secrets, key: DATABASE_URL}}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop: {exec: {command: [sleep, "3"]}}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: payments
+  namespace: pulseops
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: payments}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: payments
+  namespace: pulseops
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: payments}
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+  namespace: pulseops
+  labels: {app.kubernetes.io/name: loadgen, app.kubernetes.io/part-of: pulseops}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: loadgen}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: loadgen, app.kubernetes.io/part-of: pulseops}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "9100"}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: loadgen
+          image: pulseops/loadgen
+          command: [python, -m, loadgen.main]
+          env:
+            - name: GATEWAY_URL
+              valueFrom: {configMapKeyRef: {name: shop-config, key: GATEWAY_URL}}
+            - {name: REQUESTS_PER_SEC, value: "8"}
+          ports: [{name: metrics, containerPort: 9100}]
+          livenessProbe:
+            httpGet: {path: /metrics, port: metrics}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 192Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

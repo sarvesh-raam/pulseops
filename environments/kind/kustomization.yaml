@@ -1,0 +1,43 @@
+# Local Kubernetes with kind:  make kind-up  (see README)
+# Uses locally built images and exposes the UIs on localhost through the
+# NodePorts mapped in kind-cluster.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [../../deploy]
+
+images:
+  - {name: ghcr.io/sarvesh-raam/pulseops-gateway, newName: pulseops/gateway, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-orders, newName: pulseops/orders, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-inventory, newName: pulseops/inventory, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-payments, newName: pulseops/payments, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-loadgen, newName: pulseops/loadgen, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-controlplane, newName: pulseops/controlplane, newTag: local}
+  - {name: ghcr.io/sarvesh-raam/pulseops-console, newName: pulseops/console, newTag: local}
+
+patches:
+  - target: {kind: Service, name: console, namespace: pulseops-system}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30080}
+  - target: {kind: Service, name: grafana, namespace: pulseops-observability}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30300}
+  - target: {kind: Service, name: prometheus, namespace: pulseops-observability}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30090}
+  - target: {kind: Service, name: alertmanager, namespace: pulseops-observability}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30093}
+  - target: {kind: Service, name: jaeger, namespace: pulseops-observability}
+    patch: |-
+      - {op: add, path: /spec/type, value: NodePort}
+      - {op: add, path: /spec/ports/0/nodePort, value: 30686}
+  - target: {kind: ConfigMap, name: controlplane-config, namespace: pulseops-system}
+    patch: |-
+      - {op: replace, path: /data/GRAFANA_URL, value: "http://localhost:13001"}
+      - {op: replace, path: /data/PROMETHEUS_PUBLIC_URL, value: "http://localhost:19095"}
+      - {op: replace, path: /data/JAEGER_URL, value: "http://localhost:26686"}
+      - {op: replace, path: /data/ALERTMANAGER_URL, value: "http://localhost:19093"}

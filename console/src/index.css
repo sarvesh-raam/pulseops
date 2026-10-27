@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* Semantic tokens: dark is the default ops look, light follows the OS. */
+:root {
+  --bg: #070b14;
+  --surface: #0d1422;
+  --surface-2: #131c2e;
+  --border: #1f2a40;
+  --fg: #e6ebf5;
+  --muted: #8592ad;
+  --accent: #34d399;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --info: #60a5fa;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --surface-2: #eef2f8;
+    --border: #d9e0ec;
+    --fg: #101828;
+    --muted: #5b6780;
+    --accent: #059669;
+    --ok: #059669;
+    --warn: #b45309;
+    --bad: #dc2626;
+    --info: #2563eb;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-info: var(--info);
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Menlo, monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular { font-variant-numeric: tabular-nums; }
+
+@keyframes ping-soft { 0% { transform: scale(1); opacity: .7 } 80%, 100% { transform: scale(2.4); opacity: 0 } }
+.pulse-ring::after {
+  content: ""; position: absolute; inset: 0; border-radius: 9999px;
+  background: currentColor; animation: ping-soft 1.6s cubic-bezier(0, 0, .2, 1) infinite;
+}
+@media (prefers-reduced-motion: reduce) { .pulse-ring::after { animation: none } }

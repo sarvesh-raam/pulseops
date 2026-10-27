@@ -1,0 +1,61 @@
+groups:
+  - name: pulseops-services
+    rules:
+      - alert: ServiceDown
+        expr: max by (service) (pulseops_service_replicas{state="ready"}) == 0 and max by (service) (pulseops_service_replicas{state="desired"}) > 0
+        for: 20s
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} has no ready replicas"
+
+      - alert: ServiceDegraded
+        expr: max by (service) (pulseops_service_replicas{state="ready"}) < max by (service) (pulseops_service_replicas{state="desired"})
+        for: 30s
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} is running below its desired replica count"
+
+      - alert: HighErrorRate
+        expr: |
+          sum by (service) (rate(http_server_requests_total{status=~"5.."}[1m]))
+            / sum by (service) (rate(http_server_requests_total[1m])) > 0.05
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} error rate is {{ $value | humanizePercentage }}"
+
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(0.95, sum by (service, le) (rate(http_server_request_duration_seconds_bucket[2m]))) > 0.5
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} p95 latency is {{ $value | humanizeDuration }}"
+
+      - alert: CircuitBreakerOpen
+        expr: max by (service, target) (circuit_breaker_state) == 2
+        for: 15s
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.service }} stopped calling {{ $labels.target }} (circuit open)"
+
+      - alert: CustomerImpact
+        expr: |
+          sum(rate(loadgen_requests_total{outcome="ok"}[1m])) / sum(rate(loadgen_requests_total[1m])) < 0.98
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Only {{ $value | humanizePercentage }} of customer requests are succeeding"
+
+      - alert: ScrapeTargetDown
+        expr: up == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})"
+
+      - alert: ChaosRecoveryFailed
+        expr: increase(pulseops_chaos_recovery_failures_total[15m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.service }} did not self-heal after a chaos experiment"

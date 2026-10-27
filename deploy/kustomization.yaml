@@ -1,0 +1,57 @@
+# PulseOps on Kubernetes: `kubectl apply -k deploy`
+#
+# Base for every environment (overlays live in environments/). Manifests
+# and the observability configs sit side by side here so observability/ is
+# the single source of truth for docker-compose and Kubernetes alike.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - k8s/namespaces.yaml
+  - k8s/workloads/config.yaml
+  - k8s/workloads/postgres.yaml
+  - k8s/workloads/shop.yaml
+  - k8s/system/controlplane.yaml
+  - k8s/system/console.yaml
+  - k8s/observability/prometheus.yaml
+  - k8s/observability/alertmanager.yaml
+  - k8s/observability/grafana.yaml
+  - k8s/observability/loki-jaeger.yaml
+  - k8s/observability/promtail.yaml
+
+configMapGenerator:
+  - name: prometheus-config
+    namespace: pulseops-observability
+    files:
+      - prometheus.yml=observability/prometheus/prometheus-k8s.yml
+      - alerts.yml=observability/prometheus/alerts.yml
+  - name: alertmanager-config
+    namespace: pulseops-observability
+    files: [alertmanager.yml=observability/alertmanager/alertmanager-k8s.yml]
+  - name: loki-config
+    namespace: pulseops-observability
+    files: [loki.yml=observability/loki/loki.yml]
+  - name: promtail-config
+    namespace: pulseops-observability
+    files: [promtail.yml=observability/promtail/promtail-k8s.yml]
+  - name: grafana-datasources
+    namespace: pulseops-observability
+    files: [datasources.yml=observability/grafana/provisioning/datasources/datasources.yml]
+  - name: grafana-dashboard-providers
+    namespace: pulseops-observability
+    files: [dashboards.yml=observability/grafana/provisioning/dashboards/dashboards.yml]
+  - name: grafana-dashboards
+    namespace: pulseops-observability
+    files:
+      - observability/grafana/dashboards/pulseops-services.json
+      - observability/grafana/dashboards/pulseops-chaos.json
+
+# CD pins these to the commit SHA; the kind overlay swaps in local builds.
+images:
+  - {name: pulseops/gateway, newName: ghcr.io/sarvesh-raam/pulseops-gateway, newTag: latest}
+  - {name: pulseops/orders, newName: ghcr.io/sarvesh-raam/pulseops-orders, newTag: latest}
+  - {name: pulseops/inventory, newName: ghcr.io/sarvesh-raam/pulseops-inventory, newTag: latest}
+  - {name: pulseops/payments, newName: ghcr.io/sarvesh-raam/pulseops-payments, newTag: latest}
+  - {name: pulseops/loadgen, newName: ghcr.io/sarvesh-raam/pulseops-loadgen, newTag: latest}
+  - {name: pulseops/controlplane, newName: ghcr.io/sarvesh-raam/pulseops-controlplane, newTag: latest}
+  - {name: pulseops/console, newName: ghcr.io/sarvesh-raam/pulseops-console, newTag: latest}

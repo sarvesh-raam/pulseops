@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulseops
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulseops-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+# promtail reads node log files through a hostPath, which the stricter
+# levels forbid; everything else here still runs non-root.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pulseops-observability
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: baseline

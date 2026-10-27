@@ -1,0 +1,177 @@
+name: pulseops-platform
+
+# Shop microservices (the workloads under observation) + PulseOps control
+# plane/console + the observability stack. Every target workload runs with
+# init: true and restart: always: the chaos button SIGKILLs the process
+# inside the container and Docker's restart policy heals it.
+
+x-service: &service
+  build: {context: ./services}
+  init: true
+  restart: always
+  labels: {pulseops.target: "true"}
+  environment: &service-env
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    FAULT_ADMIN_TOKEN: ${FAULT_ADMIN_TOKEN:-local-fault-token}
+    DATABASE_URL: postgresql://pulseops:${POSTGRES_PASSWORD:-pulseops}@postgres:5432/pulseops
+  depends_on:
+    postgres: {condition: service_healthy}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    init: true
+    restart: always
+    labels: {pulseops.target: "true"}
+    environment:
+      POSTGRES_USER: pulseops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulseops}
+      POSTGRES_DB: pulseops
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulseops -d pulseops"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  inventory:
+    <<: *service
+    build: {context: ./services, args: {SERVICE: inventory}}
+    image: pulseops/inventory:local
+    deploy: {replicas: 2}
+
+  payments:
+    <<: *service
+    build: {context: ./services, args: {SERVICE: payments}}
+    image: pulseops/payments:local
+    deploy: {replicas: 2}
+
+  orders:
+    <<: *service
+    build: {context: ./services, args: {SERVICE: orders}}
+    image: pulseops/orders:local
+    deploy: {replicas: 2}
+    environment:
+      <<: *service-env
+      INVENTORY_URL: http://inventory:8000
+      PAYMENTS_URL: http://payments:8000
+
+  gateway:
+    <<: *service
+    build: {context: ./services, args: {SERVICE: gateway}}
+    image: pulseops/gateway:local
+    deploy: {replicas: 2}
+    depends_on: [orders, inventory]
+    environment:
+      <<: *service-env
+      ORDERS_URL: http://orders:8000
+      INVENTORY_URL: http://inventory:8000
+    # not published: reach the shop API through the console at /shop/api/...
+
+  loadgen:
+    <<: *service
+    build: {context: ./services, args: {SERVICE: loadgen}}
+    image: pulseops/loadgen:local
+    depends_on: [gateway]
+    command: ["python", "-m", "loadgen.main"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9100/metrics"]
+      interval: 10s
+    environment:
+      GATEWAY_URL: http://gateway:8000
+      REQUESTS_PER_SEC: ${LOADGEN_RPS:-8}
+
+  # --- PulseOps -------------------------------------------------------------
+  controlplane:
+    build: {context: ./services, args: {SERVICE: controlplane}}
+    image: pulseops/controlplane:local
+    restart: unless-stopped
+    # needs the Docker socket to list and kill containers (local demo only;
+    # on Kubernetes it uses a namespaced service account instead)
+    user: "0"
+    volumes: [/var/run/docker.sock:/var/run/docker.sock]
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      FAULT_ADMIN_TOKEN: ${FAULT_ADMIN_TOKEN:-local-fault-token}
+      RUNTIME_MODE: docker
+      COMPOSE_PROJECT: pulseops-platform
+      PROMETHEUS_URL: http://prometheus:9090
+      CONTROL_PLANE_TOKEN: ${CONTROL_PLANE_TOKEN:-}
+      GRAFANA_URL: http://localhost:${GRAFANA_PORT:-3001}
+      PROMETHEUS_PUBLIC_URL: http://localhost:${PROMETHEUS_PORT:-9095}
+      JAEGER_URL: http://localhost:${JAEGER_PORT:-16686}
+      ALERTMANAGER_URL: http://localhost:${ALERTMANAGER_PORT:-9093}
+
+  console:
+    build: {context: ./console}
+    image: pulseops/console:local
+    restart: unless-stopped
+    depends_on: [controlplane]
+    ports: ["${CONSOLE_PORT:-8088}:8080"]
+
+  # --- observability ----------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=3d
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/observability/prometheus/prometheus-compose.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - promdata:/prometheus
+    ports: ["${PROMETHEUS_PORT:-9095}:9090"]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    volumes: [./deploy/observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro]
+    ports: ["${ALERTMANAGER_PORT:-9093}:9093"]
+
+  loki:
+    image: grafana/loki:3.1.1
+    restart: unless-stopped
+    command: [-config.file=/etc/loki/loki.yml]
+    volumes:
+      - ./deploy/observability/loki/loki.yml:/etc/loki/loki.yml:ro
+      - lokidata:/loki
+
+  promtail:
+    image: grafana/promtail:3.1.1
+    restart: unless-stopped
+    command: [-config.file=/etc/promtail/promtail.yml]
+    volumes:
+      - ./deploy/observability/promtail/promtail-compose.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on: [loki]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    restart: unless-stopped
+    environment: {COLLECTOR_OTLP_ENABLED: "true"}
+    ports: ["${JAEGER_PORT:-16686}:16686"]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/pulseops-services.json
+      PROMETHEUS_URL: http://prometheus:9090
+      LOKI_URL: http://loki:3100
+      JAEGER_URL: http://jaeger:16686
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["${GRAFANA_PORT:-3001}:3000"]
+
+volumes:
+  pgdata:
+  promdata:
+  lokidata:

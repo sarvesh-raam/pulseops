@@ -1,0 +1,15 @@
+# kind create cluster --config environments/kind/kind-cluster.yaml
+# Two worker nodes so replicas spread and a killed pod can land elsewhere.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: pulseops
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - {containerPort: 30080, hostPort: 18088}   # console
+      - {containerPort: 30300, hostPort: 13001}   # grafana
+      - {containerPort: 30090, hostPort: 19095}   # prometheus
+      - {containerPort: 30093, hostPort: 19093}   # alertmanager
+      - {containerPort: 30686, hostPort: 26686}   # jaeger
+  - role: worker
+  - role: worker
